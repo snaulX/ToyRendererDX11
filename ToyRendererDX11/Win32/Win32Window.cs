@@ -6,11 +6,11 @@ using static ToyRendererDX11.Win32.User32;
 
 namespace ToyRendererDX11.Win32
 {
-    public class Window32 : Window
+    public class Win32Window : Window
     {
         private const int CW_USEDEFAULT = unchecked((int)0x80000000);
 
-        public unsafe Window32(string title, int width, int height) : base(title, width, height)
+        public unsafe Win32Window(string title, int width, int height) : base(title, width, height)
         {
             int x = 0;
             int y = 0;
@@ -39,14 +39,8 @@ namespace ToyRendererDX11.Win32
                     y = (screenHeight - ClientSize.Height) / 2;
                 }
 
-                if (resizable)
-                {
-                    style = WindowStyles.WS_OVERLAPPEDWINDOW;
-                }
-                else
-                {
-                    style = WindowStyles.WS_POPUP | WindowStyles.WS_BORDER | WindowStyles.WS_CAPTION | WindowStyles.WS_SYSMENU;
-                }
+                style = resizable ? WindowStyles.WS_OVERLAPPEDWINDOW :
+                    WindowStyles.WS_POPUP | WindowStyles.WS_BORDER | WindowStyles.WS_CAPTION | WindowStyles.WS_SYSMENU;
 
                 styleEx = WindowExStyles.WS_EX_APPWINDOW | WindowExStyles.WS_EX_WINDOWEDGE;
             }
@@ -70,7 +64,7 @@ namespace ToyRendererDX11.Win32
                 x = y = windowWidth = windowHeight = CW_USEDEFAULT;
             }
 
-            fixed (char* lpszClassName = "Application.WindowClassName")
+            fixed (char* lpszClassName = Application.WindowClassName)
             {
                 fixed (char* lpWindowName = Title)
                 {

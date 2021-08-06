@@ -25,6 +25,7 @@ namespace ToyRendererDX11
 
         private const int FrameCount = 2;
 
+        public readonly Window Window;
         public readonly Size Size;
         public readonly IDXGIFactory2 Factory;
         public readonly ID3D11Device1 Device;
@@ -35,12 +36,27 @@ namespace ToyRendererDX11
         public readonly ID3D11Texture2D OffscreenTexture;
         public readonly ID3D11RenderTargetView RenderTargetView;
 
-        public GraphicsDevice()
+        public GraphicsDevice(Window window)
+            : this(window, window.ClientSize)
         {
-            if (CreateDXGIFactory1(out Factory).Failure)
-                throw new InvalidOperationException("Cannot create IDXGIFactory1");
+        }
 
-            using (IDXGIAdapter1 adapter = GetHardwareAdapter())
+        public GraphicsDevice(Size size)
+            : this(null, size)
+        {
+        }
+
+        public GraphicsDevice(Window window, Size size)
+        {
+            Window = window;
+            Size = size;
+
+            if (CreateDXGIFactory1(out Factory).Failure)
+            {
+                throw new InvalidOperationException("Cannot create IDXGIFactory1");
+            }
+
+            using (IDXGIAdapter1? adapter = GetHardwareAdapter())
             {
                 DeviceCreationFlags creationFlags = DeviceCreationFlags.BgraSupport;
 #if DEBUG
@@ -72,6 +88,41 @@ namespace ToyRendererDX11
                 DeviceContext = tempContext.QueryInterface<ID3D11DeviceContext1>();
                 tempContext.Dispose();
                 tempDevice.Dispose();
+            }
+
+            if (window != null)
+            {
+                IntPtr hwnd = window.Handle;
+
+                SwapChainDescription1 swapChainDescription = new SwapChainDescription1()
+                {
+                    Width = window.ClientSize.Width,
+                    Height = window.ClientSize.Height,
+                    Format = Format.R8G8B8A8_UNorm,
+                    BufferCount = FrameCount,
+                    Usage = Usage.RenderTargetOutput,
+                    SampleDescription = new SampleDescription(1, 0),
+                    Scaling = Scaling.Stretch,
+                    SwapEffect = SwapEffect.FlipDiscard,
+                    AlphaMode = AlphaMode.Ignore
+                };
+
+                SwapChainFullscreenDescription fullscreenDescription = new SwapChainFullscreenDescription
+                {
+                    Windowed = true
+                };
+
+                SwapChain = Factory.CreateSwapChainForHwnd(Device, hwnd, swapChainDescription, fullscreenDescription);
+                Factory.MakeWindowAssociation(hwnd, WindowAssociationFlags.IgnoreAltEnter);
+
+                BackBufferTexture = SwapChain.GetBuffer<ID3D11Texture2D>(0);
+                RenderTargetView = Device.CreateRenderTargetView(BackBufferTexture);
+            }
+            else
+            {
+                // Create offscreen texture
+                OffscreenTexture = Device.CreateTexture2D(new Texture2DDescription(Format.R8G8B8A8_UNorm, Size.Width, Size.Height, 1, 1, BindFlags.ShaderResource | BindFlags.RenderTarget));
+                RenderTargetView = Device.CreateRenderTargetView(OffscreenTexture);
             }
         }
 
@@ -124,6 +175,96 @@ namespace ToyRendererDX11
             }
 
             return adapter;
+        }
+
+        public bool DrawFrame(Action<int, int> draw, [CallerMemberName] string frameName = null)
+        {
+            var clearColor = new Color4(0.0f, 0.2f, 0.4f, 1.0f);
+            DeviceContext.ClearRenderTargetView(RenderTargetView, clearColor);
+            DeviceContext.OMSetRenderTargets(RenderTargetView, /*depthStencil*/null);
+
+            DeviceContext.RSSetViewport(new Viewport(Size.Width, Size.Height));
+
+            // Call callback.
+            draw(Size.Width, Size.Height);
+
+            if (SwapChain != null)
+            {
+                Result result = SwapChain.Present(1, PresentFlags.None);
+                if (result.Failure
+                    && result.Code == Vortice.DXGI.ResultCode.DeviceRemoved.Code)
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        public ID3D11Texture2D CaptureTexture(ID3D11Texture2D source)
+        {
+            ID3D11Texture2D stagingTexture;
+            var desc = source.Description;
+
+            if (desc.ArraySize > 1 || desc.MipLevels > 1)
+            {
+                Console.WriteLine("WARNING: ScreenGrab does not support 2D arrays, cubemaps, or mipmaps; only the first surface is written. Consider using DirectXTex instead.");
+                return null;
+            }
+
+            if (desc.SampleDescription.Count > 1)
+            {
+                // MSAA content must be resolved before being copied to a staging texture
+                desc.SampleDescription.Count = 1;
+                desc.SampleDescription.Quality = 0;
+
+                ID3D11Texture2D temp = Device.CreateTexture2D(desc);
+                Format format = desc.Format;
+
+                FormatSupport formatSupport = Device.CheckFormatSupport(format);
+
+                if ((formatSupport & FormatSupport.MultisampleResolve) == FormatSupport.None)
+                {
+                    return null;
+                }
+
+                for (int item = 0; item < desc.ArraySize; ++item)
+                {
+                    for (int level = 0; level < desc.MipLevels; ++level)
+                    {
+                        int index = ID3D11Resource.CalculateSubResourceIndex(level, item, desc.MipLevels);
+                        DeviceContext.ResolveSubresource(temp, index, source, index, format);
+                    }
+                }
+
+                desc.BindFlags = BindFlags.None;
+                desc.OptionFlags &= ResourceOptionFlags.TextureCube;
+                desc.CpuAccessFlags = CpuAccessFlags.Read;
+                desc.Usage = ResourceUsage.Staging;
+
+                stagingTexture = Device.CreateTexture2D(desc);
+
+                DeviceContext.CopyResource(stagingTexture, temp);
+            }
+            else if ((desc.Usage == ResourceUsage.Staging) && ((desc.CpuAccessFlags & CpuAccessFlags.Read) != CpuAccessFlags.None))
+            {
+                // Handle case where the source is already a staging texture we can use directly
+                stagingTexture = source;
+            }
+            else
+            {
+                // Otherwise, create a staging texture from the non-MSAA source
+                desc.BindFlags = 0;
+                desc.OptionFlags &= ResourceOptionFlags.TextureCube;
+                desc.CpuAccessFlags = CpuAccessFlags.Read;
+                desc.Usage = ResourceUsage.Staging;
+
+                stagingTexture = Device.CreateTexture2D(desc);
+
+                DeviceContext.CopyResource(stagingTexture, source);
+            }
+
+            return stagingTexture;
         }
 
         public void Dispose()
